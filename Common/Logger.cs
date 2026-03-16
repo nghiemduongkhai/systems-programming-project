@@ -6,7 +6,7 @@ namespace InventoryKPI.Common
     public static class Logger
     {
         private static readonly object _lock = new object();
-        private static readonly string _logFolder = @"../../../Data/logs";
+        private static readonly string _logFolder = @"../../../InventoryData/logs";
 
         public static void Info(string message)
         {

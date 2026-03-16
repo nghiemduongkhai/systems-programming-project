@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using InventoryKPI.Core.Interfaces;
 using InventoryKPI.Core.Models;
 
@@ -20,53 +18,42 @@ namespace InventoryKPI.Application.Services
         // KPI 1
         public int CalculateTotalSKUs()
         {
-            var stock = _inventory.GetStockLevels();
-            return stock.Count;
+            return _inventory.GetStockLevels().Count;
         }
 
-        // KPI 2
-        public decimal CalculateStockValue()
+        // KPI 2 (per SKU)
+        public decimal CalculateStockValue(string? itemCode = null)
         {
             var stock = _inventory.GetStockLevels();
+
+            if (!string.IsNullOrEmpty(itemCode))
+            {
+                return stock.TryGetValue(itemCode, out var qty)
+                    ? qty * _inventory.GetUnitCost(itemCode)
+                    : 0;
+            }
 
             decimal total = 0;
 
             foreach (var item in stock)
             {
+                if (item.Value <= 0)
+                    continue;
+
                 var cost = _inventory.GetUnitCost(item.Key);
+
                 total += item.Value * cost;
             }
 
             return total;
         }
 
-        // KPI 2 (per SKU)
-        public decimal CalculateStockValue(string itemCode)
-        {
-            var stock = _inventory.GetStockLevels();
-
-            if (!stock.TryGetValue(itemCode, out var qty))
-                return 0;
-
-            var cost = _inventory.GetUnitCost(itemCode);
-
-            return qty * cost;
-        }
-
-        // KPI 3 
+        // KPI 3
         public int CalculateOutOfStockItems()
         {
             var stock = _inventory.GetStockLevels();
 
-            int count = 0;
-
-            foreach (var item in stock)
-            {
-                if (item.Value <= 0)
-                    count++;
-            }
-
-            return count;
+            return stock.Values.Count(v => v <= 0);
         }
 
         // KPI 3 (per SKU)
@@ -80,67 +67,62 @@ namespace InventoryKPI.Application.Services
             return qty <= 0;
         }
 
-        // KPI 4 
-        public decimal CalculateAverageDailySales()
+        // KPI 4
+        public decimal CalculateAverageDailySales(string? itemCode = null)
         {
-            var sales = _inventory.GetSales();
+            IEnumerable<SaleRecord> sales = _inventory.GetSales();
 
-            if (!sales.Any())
+            if (!string.IsNullOrEmpty(itemCode))
+                sales = sales.Where(x => x.ItemCode == itemCode);
+
+            var salesList = sales.ToList();
+
+            if (salesList.Count == 0)
                 return 0;
 
-            var totalSold = sales.Sum(x => x.Quantity);
+            var totalSold = salesList.Sum(x => x.Quantity);
 
-            var start = sales.Min(x => x.Date).Date;
-            var end = sales.Max(x => x.Date).Date;
+            var start = salesList.Min(x => x.Date).Date;
+            var end = salesList.Max(x => x.Date).Date;
 
             var days = Math.Max((end - start).Days + 1, 1);
 
-            return totalSold / days;
+            return (decimal)totalSold / days;
         }
 
-        // KPI 4 (per SKU)
-        public decimal CalculateAverageDailySales(string itemCode)
+        // KPI 5
+        public double CalculateAverageInventoryAge(string? itemCode = null)
         {
-            var sales = _inventory.GetSales()
-                .Where(x => x.ItemCode == itemCode);
+            var purchases = _inventory.GetPurchases()
+                .OrderByDescending(p => p.Date)
+                .ToList();
 
-            if (!sales.Any())
-                return 0;
-
-            var totalSold = sales.Sum(x => x.Quantity);
-
-            var start = sales.Min(x => x.Date).Date;
-            var end = sales.Max(x => x.Date).Date;
-
-            var days = Math.Max((end - start).Days + 1, 1);
-
-            return totalSold / days;
-        }
-
-        // KPI 5 
-        public double CalculateAverageInventoryAge()
-        {
-            var purchases = _inventory.GetPurchases();
             var stock = _inventory.GetStockLevels();
 
-            if (!purchases.Any())
+            if (purchases.Count == 0)
                 return 0;
+
+            var purchaseGroups = purchases
+                .GroupBy(p => p.ItemCode)
+                .ToDictionary(g => g.Key, g => g);
 
             var now = DateTime.UtcNow;
 
             double weightedAge = 0;
             double totalQty = 0;
 
-            foreach (var sku in stock.Keys)
-            {
-                var remainingStock = stock[sku];
+            IEnumerable<string> targetSkus =
+                string.IsNullOrEmpty(itemCode)
+                ? stock.Keys
+                : new[] { itemCode };
 
-                if (remainingStock <= 0)
+            foreach (var sku in targetSkus)
+            {
+                if (!stock.TryGetValue(sku, out var remainingStock) || remainingStock <= 0)
                     continue;
 
-                var skuPurchases = purchases
-                    .Where(p => p.ItemCode == sku)
-                    .OrderByDescending(p => p.Date);
+                if (!purchaseGroups.TryGetValue(sku, out var skuPurchases))
+                    continue;
 
                 foreach (var p in skuPurchases)
                 {
@@ -162,51 +144,6 @@ namespace InventoryKPI.Application.Services
                 return 0;
 
             return weightedAge / totalQty;
-        }
-
-        // KPI 5 (per SKU)
-        public double CalculateAverageInventoryAge(string itemCode)
-        {
-            var purchases = _inventory.GetPurchases()
-                .Where(x => x.ItemCode == itemCode)
-                .OrderByDescending(x => x.Date)
-                .ToList();
-
-            if (!purchases.Any())
-                return 0;
-
-            var stock = _inventory.GetStockLevels();
-
-            if (!stock.TryGetValue(itemCode, out var remainingStock))
-                return 0;
-
-            if (remainingStock <= 0)
-                return 0;
-
-            var now = DateTime.UtcNow;
-
-            double weightedAge = 0;
-            double countedQty = 0;
-
-            foreach (var p in purchases)
-            {
-                if (remainingStock <= 0)
-                    break;
-
-                var takeQty = Math.Min((double)p.Quantity, (double)remainingStock);
-
-                var ageDays = (now - p.Date).TotalDays;
-
-                weightedAge += ageDays * takeQty;
-                countedQty += takeQty;
-
-                remainingStock -= (decimal)takeQty;
-            }
-
-            if (countedQty == 0)
-                return 0;
-
-            return weightedAge / countedQty;
         }
     }
 }

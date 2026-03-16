@@ -22,11 +22,13 @@ internal class Program
         var inventory = new InventoryService();
         inventory.LoadProducts(products.Values);
 
+        await inventory.LoadStateAsync(Config.InventoryStateFile);
+
         var processor = new InvoiceProcessor(inventory, products);
 
         var queue = new InvoiceQueueService(parser, fileService, processor);
 
-        // Load existing invoice files
+        // Load invoice files
         foreach (var file in fileService.GetInvoiceFiles(Config.InvoiceFolder))
         {
             await queue.Enqueue(file);
@@ -40,9 +42,21 @@ internal class Program
 
         var kpiService = new KPIService(inventory);
         var consoleReport = new KPIReportGenerator(kpiService);
-        var skuReport = new SKUReportGenerator(kpiService, products);
+        var skuReport = new SKUReportGenerator(kpiService, inventory, products);
 
-        // Refresh KPI mỗi 2 giây
+        // Lưu Inventory khi thoát
+        Console.CancelKeyPress += async (sender, e) =>
+        {
+            Logger.Info("Ctrl+C detected. Saving inventory...");
+            await inventory.SaveStateAsync(Config.InventoryStateFile);
+        };
+        AppDomain.CurrentDomain.ProcessExit += (sender, e) =>
+        {
+            Logger.Info("Process exiting. Saving inventory...");
+            inventory.SaveStateAsync(Config.InventoryStateFile).Wait();
+        };
+
+        // KPI console
         while (true)
         {
             Console.Clear();
@@ -51,7 +65,7 @@ internal class Program
 
             skuReport.Generate(Config.ReportFile);
 
-            await Task.Delay(2500);
+            await Task.Delay(2000);
         }
     }
 }

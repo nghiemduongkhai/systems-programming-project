@@ -2,6 +2,9 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
+using System.Text.Json;
+using System.Threading.Tasks;
 using InventoryKPI.Common;
 using InventoryKPI.Core.Interfaces;
 using InventoryKPI.Core.Models;
@@ -12,6 +15,8 @@ namespace InventoryKPI.Application.Services
     {
         private readonly ConcurrentDictionary<string, decimal> _stock = new();
         private readonly ConcurrentDictionary<string, decimal> _avgCosts = new();
+
+        private readonly HashSet<string> _skus = new();
 
         private readonly List<SaleRecord> _sales = new();
         private readonly List<PurchaseRecord> _purchases = new();
@@ -44,30 +49,23 @@ namespace InventoryKPI.Application.Services
             if (unitCost < 0)
                 throw new ArgumentException("Unit cost cannot be negative", nameof(unitCost));
 
-            var newStock = _stock.AddOrUpdate(
-                itemCode,
-                quantity,
-                (_, currentStock) => currentStock + quantity);
-
-            var oldStock = newStock - quantity;
-
-            var oldCost = _avgCosts.TryGetValue(itemCode, out var existingCost)
-                ? existingCost
-                : 0;
-
-            var totalStock = oldStock + quantity;
-
-            if (totalStock > 0)
-            {
-                var newAvgCost =
-                    ((oldStock * oldCost) + (quantity * unitCost))
-                    / totalStock;
-
-                _avgCosts[itemCode] = newAvgCost;
-            }
-
             lock (_lock)
             {
+                _skus.Add(itemCode);
+
+                var oldStock = _stock.TryGetValue(itemCode, out var s) ? s : 0;
+                var oldCost = _avgCosts.TryGetValue(itemCode, out var c) ? c : 0;
+
+                var newStock = oldStock + quantity;
+
+                _stock[itemCode] = newStock;
+
+                var newAvgCost =
+                    ((oldStock * oldCost) + (quantity * unitCost))
+                    / newStock;
+
+                _avgCosts[itemCode] = newAvgCost;
+
                 _purchases.Add(new PurchaseRecord
                 {
                     ItemCode = itemCode,
@@ -86,28 +84,16 @@ namespace InventoryKPI.Application.Services
             if (quantity <= 0)
                 throw new ArgumentException("Quantity must be positive", nameof(quantity));
 
-            while (true)
+            lock (_lock)
             {
-                if (!_stock.TryGetValue(itemCode, out var currentStock))
-                {
-                    Logger.Warning($"Unknown SKU: {itemCode}");
-                    return;
-                }
+                _skus.Add(itemCode);
 
-                if (currentStock < quantity)
-                {
-                    Logger.Warning($"Sale exceeds stock for {itemCode}");
-                    return;
-                }
+                var currentStock = _stock.TryGetValue(itemCode, out var s) ? s : 0;
 
                 var newStock = currentStock - quantity;
 
-                if (_stock.TryUpdate(itemCode, newStock, currentStock))
-                    break;
-            }
+                _stock[itemCode] = newStock;
 
-            lock (_lock)
-            {
                 _sales.Add(new SaleRecord
                 {
                     ItemCode = itemCode,
@@ -119,7 +105,13 @@ namespace InventoryKPI.Application.Services
 
         public Dictionary<string, decimal> GetStockLevels()
         {
-            return new Dictionary<string, decimal>(_stock);
+            lock (_lock)
+            {
+                return _skus.ToDictionary(
+                    sku => sku,
+                    sku => _stock.TryGetValue(sku, out var qty) ? qty : 0
+                );
+            }
         }
 
         public decimal GetUnitCost(string itemCode)
@@ -146,6 +138,69 @@ namespace InventoryKPI.Application.Services
             {
                 return _purchases.ToList();
             }
+        }
+
+        public async Task SaveStateAsync(string path)
+        {
+            var directory = Path.GetDirectoryName(path);
+
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var data = _stock.Select(x => new
+            {
+                itemCode = x.Key,
+                stock = x.Value,
+                avgCost = _avgCosts.TryGetValue(x.Key, out var cost) ? cost : 0
+            });
+
+            var json = JsonSerializer.Serialize(new { products = data }, new JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+
+            await File.WriteAllTextAsync(path, json);
+        }
+
+        public async Task LoadStateAsync(string path)
+        {
+            if (!File.Exists(path))
+            {
+                Logger.Info($"Inventory state file not found: {path}. Starting with empty inventory.");
+                return;
+            }
+
+            var json = await File.ReadAllTextAsync(path);
+
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                Logger.Warning($"Inventory state file is empty: {path}");
+                return;
+            }
+
+            var doc = JsonDocument.Parse(json);
+
+            var count = 0;
+
+            foreach (var p in doc.RootElement.GetProperty("products").EnumerateArray())
+            {
+                var itemCode = p.GetProperty("itemCode").GetString();
+                var stock = p.GetProperty("stock").GetDecimal();
+                var cost = p.GetProperty("avgCost").GetDecimal();
+
+                if (string.IsNullOrWhiteSpace(itemCode))
+                    continue;
+
+                _stock[itemCode] = stock;
+                _avgCosts[itemCode] = cost;
+                _skus.Add(itemCode);
+
+                count++;
+            }
+
+            Logger.Info($"Inventory state loaded successfully. {count} products restored.");
         }
     }
 }

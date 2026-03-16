@@ -99,7 +99,8 @@ namespace InventoryKPI.Infrastructure.Monitoring
 
                 if (invoices == null || invoices.Count == 0)
                 {
-                    Logger.Info($"No valid invoices found in {file}");
+                    Logger.Info($"{file} has no valid ItemCode");
+                    _fileService.MoveToProcessed(file);
                     return;
                 }
 

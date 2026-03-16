@@ -12,11 +12,13 @@ namespace InventoryKPI.Report
     public class SKUReportGenerator
     {
         private readonly IKPIService _kpi;
+        private readonly IInventoryService _inventory;
         private readonly Dictionary<string, Product> _products;
 
-        public SKUReportGenerator(IKPIService kpi, Dictionary<string, Product> products)
+        public SKUReportGenerator(IKPIService kpi, IInventoryService inventory, Dictionary<string, Product> products)
         {
             _kpi = kpi;
+            _inventory = inventory;
             _products = products;
         }
 
@@ -24,19 +26,21 @@ namespace InventoryKPI.Report
         {
             var report = new List<object>();
 
-            foreach (var product in _products.Values)
+            var stockLevels = _inventory.GetStockLevels();
+
+            foreach (var sku in stockLevels.Keys)
             {
+                if (!_products.TryGetValue(sku, out var product))
+                    continue;
+
                 var item = new
                 {
                     ItemCode = product.Code,
                     Name = product.Name,
 
                     StockValue = _kpi.CalculateStockValue(product.Code),
-
                     OutOfStock = _kpi.IsOutOfStock(product.Code),
-
                     AverageDailySales = _kpi.CalculateAverageDailySales(product.Code),
-
                     AverageInventoryAge = _kpi.CalculateAverageInventoryAge(product.Code)
                 };
 
@@ -45,12 +49,13 @@ namespace InventoryKPI.Report
 
             var json = JsonSerializer.Serialize(
                 report,
-                new JsonSerializerOptions
-                {
-                    WriteIndented = true
-                });
+                new JsonSerializerOptions { WriteIndented = true });
 
-            Directory.CreateDirectory(Path.GetDirectoryName(outputFile)!);
+            var dir = Path.GetDirectoryName(outputFile);
+
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+
             File.WriteAllText(outputFile, json);
         }
     }

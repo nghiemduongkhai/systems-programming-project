@@ -7,8 +7,9 @@ namespace InventoryKPI.Common
     {
         public const string InvoiceFolder = @"../../../Data/invoices";
         public const string ProcessedFolder = @"../../../Data/processed";
-
         public const string ProductFile = @"../../../Data/product.txt";
-        public const string ReportFile = @"../../../Data/report.json";
+
+        public const string ReportFile = @"../../../InventoryData/report.json";
+        public const string InventoryStateFile = @"../../../InventoryData/inventory_data.json";
     }
 }
