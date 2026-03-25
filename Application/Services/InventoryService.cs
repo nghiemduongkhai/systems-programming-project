@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -149,14 +149,21 @@ namespace InventoryKPI.Application.Services
                 Directory.CreateDirectory(directory);
             }
 
-            var data = _stock.Select(x => new
+            var data = _skus.Select(sku => new
             {
-                itemCode = x.Key,
-                stock = x.Value,
-                avgCost = _avgCosts.TryGetValue(x.Key, out var cost) ? cost : 0
+                itemCode = sku,
+                stock = _stock.TryGetValue(sku, out var s) ? s : 0,
+                avgCost = _avgCosts.TryGetValue(sku, out var c) ? c : 0
             });
 
-            var json = JsonSerializer.Serialize(new { products = data }, new JsonSerializerOptions
+            var stateToSave = new
+            {
+                products = data,
+                sales = _sales,
+                purchases = _purchases
+            };
+
+            var json = JsonSerializer.Serialize(stateToSave, new JsonSerializerOptions
             {
                 WriteIndented = true
             });
@@ -181,23 +188,63 @@ namespace InventoryKPI.Application.Services
             }
 
             var doc = JsonDocument.Parse(json);
-
             var count = 0;
 
-            foreach (var p in doc.RootElement.GetProperty("products").EnumerateArray())
+            lock (_lock)
             {
-                var itemCode = p.GetProperty("itemCode").GetString();
-                var stock = p.GetProperty("stock").GetDecimal();
-                var cost = p.GetProperty("avgCost").GetDecimal();
+                _stock.Clear();
+                _avgCosts.Clear();
+                _sales.Clear();
+                _purchases.Clear();
+                _skus.Clear();
+            }
 
-                if (string.IsNullOrWhiteSpace(itemCode))
-                    continue;
+            if (doc.RootElement.TryGetProperty("products", out var productsElement))
+            {
+                foreach (var p in productsElement.EnumerateArray())
+                {
+                    var itemCode = p.GetProperty("itemCode").GetString();
+                    var stock = p.GetProperty("stock").GetDecimal();
+                    var cost = p.GetProperty("avgCost").GetDecimal();
 
-                _stock[itemCode] = stock;
-                _avgCosts[itemCode] = cost;
-                _skus.Add(itemCode);
+                    if (string.IsNullOrWhiteSpace(itemCode))
+                        continue;
 
-                count++;
+                    _stock[itemCode] = stock;
+                    _avgCosts[itemCode] = cost;
+
+                    if (stock != 0 || cost != 0)
+                    {
+                        _skus.Add(itemCode);
+                        count++;
+                    }
+                }
+            }
+
+            if (doc.RootElement.TryGetProperty("sales", out var salesElement))
+            {
+                var loadedSales = JsonSerializer.Deserialize<List<SaleRecord>>(salesElement.GetRawText());
+                if (loadedSales != null)
+                {
+                    lock (_lock)
+                    {
+                        _sales.Clear();
+                        _sales.AddRange(loadedSales);
+                    }
+                }
+            }
+
+            if (doc.RootElement.TryGetProperty("purchases", out var purchasesElement))
+            {
+                var loadedPurchases = JsonSerializer.Deserialize<List<PurchaseRecord>>(purchasesElement.GetRawText());
+                if (loadedPurchases != null)
+                {
+                    lock (_lock)
+                    {
+                        _purchases.Clear();
+                        _purchases.AddRange(loadedPurchases);
+                    }
+                }
             }
 
             Logger.Info($"Inventory state loaded successfully. {count} products restored.");
