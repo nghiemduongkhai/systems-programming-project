@@ -26,26 +26,40 @@ namespace InventoryKPI.Application.Services
         {
             var stock = _inventory.GetStockLevels();
 
-            if (!string.IsNullOrEmpty(itemCode))
-            {
-                return stock.TryGetValue(itemCode, out var qty)
-                    ? qty * _inventory.GetUnitCost(itemCode)
-                    : 0;
-            }
+            var purchaseGroups = _inventory.GetPurchases()
+                .OrderByDescending(p => p.Date)
+                .GroupBy(p => p.ItemCode)
+                .ToDictionary(g => g.Key, g => g.ToList());
 
-            decimal total = 0;
+            decimal totalValue = 0;
 
-            foreach (var item in stock)
+            IEnumerable<string> targetSkus =
+                string.IsNullOrEmpty(itemCode)
+                ? stock.Keys
+                : new[] { itemCode };
+
+            foreach (var sku in targetSkus)
             {
-                if (item.Value <= 0)
+                if (!stock.TryGetValue(sku, out var remainingStock) || remainingStock <= 0)
                     continue;
 
-                var cost = _inventory.GetUnitCost(item.Key);
+                if (!purchaseGroups.TryGetValue(sku, out var skuPurchases))
+                    continue;
 
-                total += item.Value * cost;
+                foreach (var p in skuPurchases)
+                {
+                    if (remainingStock <= 0)
+                        break;
+
+                    var takeQty = Math.Min((decimal)p.Quantity, remainingStock);
+
+                    totalValue += takeQty * p.UnitCost;
+
+                    remainingStock -= takeQty;
+                }
             }
 
-            return total;
+            return totalValue;
         }
 
         // KPI 3
